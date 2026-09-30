@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Generated output
+output/
+outputs/
+
+# Generated media
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.wav
+*.mp3
+*.ogg
+*.m4a
+*.gif
+
+# Keep example media
+!examples/
+!examples/**/*.mp4
+!examples/**/*.gif
+
+# Temporary / cache
+tmp/
+temp/
+cache/
+caches/
+*.tmp
+*.temp
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# OS metadata
+*:Zone.Identifier
+
+# Logs
+*.log
+
+# Node
+node_modules/
+.git_backup/
