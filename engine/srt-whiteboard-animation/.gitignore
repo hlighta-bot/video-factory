@@ -11,3 +11,8 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Local env files
+.env
+.env.*
+!.env.example

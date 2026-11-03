@@ -1,0 +1,15 @@
+{
+  "version": "1.0",
+  "title": "Rocket Launch",
+  "segments": [
+    {
+      "text": "The rocket is ready on the launch pad."
+    },
+    {
+      "text": "The countdown begins."
+    },
+    {
+      "text": "The rocket launches into the sky."
+    }
+  ]
+}

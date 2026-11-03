@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "assets": [
+    {
+      "id": "drawing-hand",
+      "type": "object",
+      "path": "drawing-hand.png",
+      "metadata": {
+        "source": "local-fixture"
+      }
+    }
+  ]
+}

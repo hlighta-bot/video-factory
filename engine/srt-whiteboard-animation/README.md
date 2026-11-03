@@ -1,169 +1,280 @@
-# SRT 白板动画 Skill
+# 使用指南：从文案到白板动画视频
 
-将 SRT 字幕转为按叙事顺序绘制的白板手绘视频Skill。它结合了**分区遮罩编排**与**流式笔迹绘制**：每个元素跟随字幕依次出场，笔尖在区域内连续落墨，再逐步添彩，最终导出 MP4。
+这个项目支持两条主路径生成视频：
 
-适合把知识讲解、故事口播、课程字幕或短视频文案制作成暖米黄色纸张底的手绘动画。
+1. **Story 自动流程**：从主题或文案生成 Story JSON，再生成 SRT，最后渲染成 MP4。
+2. **手动图片流程**：直接指定 SRT 和图片，生成单幕白板动画。
 
-## 效果示例
+两条路径都最终输出：
+- `scene.json`
+- 中间音频/标注等产物
+- 最终 MP4
 
-**场景：猴子山抢香蕉** —— 随着字幕的叙事顺序，依次绘制假山与小猴、抢香蕉的大猴，以及围观小朋友。
+## 先决条件
 
-![猴子山抢香蕉：SRT 白板动画演示](examples/scene-01-monkey-mountain-stream.gif)
-
-原始线稿：[查看 PNG](examples/scene-01-monkey-mountain.png)。
-
-## 核心能力
-
-- 解析 SRT 字幕，并按建议的 25–35 秒时长拆分场景
-- 先输出分镜与配图策略，确保每一幕只表达一个核心意思
-- 按字幕事件而非画面坐标，为元素建立语义化的绘制顺序
-- 用 `annotation.json` 管理区域、时序、字幕关联和重叠保护区
-- 每个区域采用连续流式笔迹：先 `ink` 铺线稿，再 `color` 添彩
-- 支持浏览器预览台调整区域、顺序、时间和字幕关联
-- 支持逐幕渲染与多幕合并，输出完整 MP4
-
-## 工作方式
-
-该 Skill 的关键在于“字幕驱动、逐步确认”。每一步完成后都等待确认，避免在分镜、线稿或标注尚未定稿时浪费渲染成本：
-
-1. 解析 SRT，输出分镜与配图策略。
-2. 确认后生成统一风格的线稿。
-3. 确认线稿后，结合字幕和原图创建标注，并载入预览台。
-4. 确认标注后，生成分区与方向检查图。
-5. 在预览台调整区域、叙事顺序、时序和字幕关联并保存。
-6. 确认最终标注后，逐幕渲染 MP4。
-7. 多幕项目在确认各幕成片后合并。
-
-## 视觉规范
-
-- 暖米黄色纸张背景：建议 `#F5EBD7`
-- 深灰色素描线条，红、橙、蓝仅作少量概念性点缀
-- 极简手绘、干净背景与充足留白
-- 不使用场景文字、标签、摄影感、3D 效果或复杂纹理
-
-## 安装与环境
-
-Skill 自带独立的 Python 虚拟环境准备脚本。首次运行时执行：
+- 已安装 Python
+- 系统 `PATH` 上可用 `ffmpeg`、`ffprobe` 和 `espeak-ng`（或 `espeak`）
+- 首次使用前先初始化项目环境
 
 ```bash
-python scripts/prepare_env.py --check
-python scripts/prepare_env.py
+python3 scripts/prepare_env.py --provider mock --tts audio8
+python3 scripts/prepare_env.py --check --provider mock --tts audio8
 ```
 
-成功后第一条命令会输出 `ENV_PY=<路径>`；后续渲染请使用该解释器，确保依赖隔离。
+`prepare_env.py` 会安装视频流水线的 Python 依赖，并检查系统命令。默认语音使用本机 Audio8 TTS（经 tts-hub），无需安装 Edge SDK；Audio8 与 tts-hub 服务会在首次合成时按接入规格自动启动。Gemini provider 需要额外的 `google-genai`：运行 `python3 scripts/prepare_env.py --provider gemini`。若希望 Audio8 不可用时自动降级到本地 eSpeak-NG，可显式指定 `--tts auto`；只使用离线合成语音指定 `--tts espeak`。`--tts edge` 仍可用于显式选择旧服务。
 
-## 项目素材结构
+Ubuntu/WSL 缺少系统工具时可先运行：
 
-```text
-assets/whiteboard/<项目名>/
-├── scene-01-<名称>.png
-├── scene-01-<名称>.annotation.json
-├── scene-01-<名称>-whiteboard.mp4
-└── scene-01-<名称>-preview.mp4
+```bash
+sudo apt-get update
+sudo apt-get install ffmpeg espeak-ng
 ```
 
-图片与标注必须同名，例如 `scene-01-demo.png` 对应 `scene-01-demo.annotation.json`。
+要调用在线模型，把 `.env.example` 复制为 `.env`（已有 `.env` 时不要覆盖），填入 `OPENAI_API_KEY` 或 `GEMINI_API_KEY`。OpenAI-compatible provider 使用 Python 标准库发请求；Gemini 还需要按上面的命令安装 SDK。
 
-## 标注格式
+之后优先使用项目内的虚拟环境：
 
-每个元素使用原图的整数像素坐标，并通过 `sequence`、`subtitle` 与 `narrativeRole` 关联字幕中的事件。区域应按“场景铺垫 → 关键人物/物体 → 动作或变化 → 反应/结果”排序。
+```bash
+.venv/bin/python
+```
+
+## 推荐路径：Story 自动流程
+
+适合“我只有主题/文案，想要一条成片”的场景。
+
+如果从主题开始，可以用一个命令串起 Story 生成、SRT 和视频制作：
+
+```bash
+.venv/bin/python scripts/story_from_topic.py \
+  --topic "一个关于火箭发射的简短故事" \
+  --provider openai \
+  --output-dir output/my-video \
+  --renderer auto \
+  --tts audio8 \
+  --image-provider sensenova
+```
+
+`--provider` 也支持 `gemini`；`mock` 适合不调用在线模型的流程演练。输出目录必须为空，以免覆盖已有产物。
+
+先确认本机完整链路可启动时，可用 `--provider mock --tts espeak` 生成本地演练成片。要生成 AI 文案，选择 `openai` 或 `gemini`，并在项目 `.env` 中填入对应 API key；环境模板见 `.env.example`。
+
+默认使用 Audio8 TTS。需能访问本机 Audio8（默认 `127.0.0.1:8024`）和 tts-hub（默认 `127.0.0.1:18084`）；缺服务时会尝试运行本机启动脚本，且请求禁用 Edge 回退。可通过 `AUDIO8_SERVICE_URL`、`TTS_HUB_URL`、`AUDIO8_VOICE` 配置服务和音色。`--tts auto` 会在 Audio8 不可用时回退到 eSpeak；`--tts espeak` 可显式选择离线语音，声音较机械。Audio8 不支持 pitch，运行清单会注明该限制。
+
+`--image-provider sensenova` 会调用 SenseNova U1.5 Lite 为每个分镜单独生成一张 16:9 插画，保存在输出目录的 `.images/`，并使用电影式镜头运动渲染。它需要 `.env` 中现有的 `OPENAI_API_KEY` / `OPENAI_BASE_URL` SenseNova 配置，也可用 `SENSENOVA_API_KEY` / `SENSENOVA_BASE_URL` 单独配置；模型可通过 `SENSENOVA_IMAGE_MODEL` 覆盖。每个分镜会产生一次图像 API 请求；不传此参数时仍使用本地程序化画面和素材解析。
+
+若文案生成或 SenseNova 出图遇到临时超时，文案和图像 API 默认最多重试 2 次，超时时间默认 300 秒，可通过 `.env` 中的 `OPENAI_TIMEOUT`、`OPENAI_RETRIES`、`SENSENOVA_IMAGE_TIMEOUT`、`SENSENOVA_IMAGE_RETRIES` 调整。图像阶段中断后，使用原命令并添加 `--resume`，会读取已有 `story.json` 和 SRT，校验并复用 `.images/` 中已完成的图片，只继续缺少的分镜；视频或 TTS 阶段已有产物时仍应选择新的输出目录。
+
+```bash
+.venv/bin/python scripts/story_from_topic.py \
+  --topic "写一个介绍七仙女的故事" \
+  --provider openai \
+  --output-dir output/my-video1 \
+  --renderer auto \
+  --tts audio8 \
+  --image-provider sensenova \
+  --resume
+```
+
+### 1) 生成 Story JSON
+
+```bash
+.venv/bin/python scripts/generate_story.py \
+  --topic "一个关于火箭发射的简短故事" \
+  --provider mock \
+  --output output/my-story.json
+```
+
+生成结果示例：
 
 ```json
 {
-  "sceneId": "scene-01",
-  "canvas": { "width": 1672, "height": 941 },
-  "storyBasis": "小猴在猴子山上拿着香蕉，大猴抢走香蕉，孩子们在旁观看。",
-  "sceneDurationMs": 9000,
-  "elements": [
-    {
-      "id": "rockery",
-      "label": "猴子山场景",
-      "sequence": 1,
-      "narrativeRole": "故事的场景铺垫",
-      "subtitle": "小猴子坐在猴子山顶，手里拿着香蕉。",
-      "type": "structure",
-      "region": { "x": 20, "y": 120, "width": 540, "height": 780 },
-      "reveal": {
-        "direction": "top_to_bottom",
-        "startMs": 300,
-        "durationMs": 2600,
-        "maskPaddingPx": 22,
-        "protectedRegions": []
-      },
-      "handPath": { "start": [290, 130], "end": [290, 890], "easing": "easeInOut" }
-    }
+  "version": "1.0",
+  "title": "Rocket Launch",
+  "segments": [
+    { "text": "The rocket ignites." },
+    { "text": "It rises into space." }
   ]
 }
 ```
 
-`direction` 和 `handPath` 用于预览台的矩形代理；最终成片的真实笔迹由流式绘制器自动生成。对于相互遮挡的对象，在较早元素的 `protectedRegions` 中标出需要延后显示的区域，避免后续内容提前露出。
+如果你已经有自己的文案，也可以直接手写同格式的 `story.json`。
 
-## 常用命令
-
-解析字幕并生成建议分镜：
+### 2) Story → SRT → MP4
 
 ```bash
-python scripts/parse_srt.py <字幕.srt> --target-sec 30 --min-sec 25 --max-sec 35
+.venv/bin/python scripts/story_pipeline.py \
+  output/my-story.json \
+  --output output/my-video \
+  --renderer auto \
+  --tts audio8
 ```
 
-生成区域检查图：
+这个命令会做三件事：
+
+- 校验 Story JSON
+- 生成确定性 SRT
+- 调用视频管线渲染最终 MP4
+
+常见输出文件会出现在 `--output` 指向的目录中，例如：
+
+- `output/my-video/scene.json`
+- `output/my-video/.images/scene-01.png` (SenseNova 选项开启时)
+- `output/my-video/whiteboard.mp4`
+- `output/my-video/final.mp4`
+
+> 如果只想要画面，不想带语音，可以加 `--render-only`。
+
+## 可选路径：手动图片流程
+
+适合“我已经有字幕和图片，只想渲染单幕”的场景。
+
+### 1) 如果你已经有 SRT
+
+先检查一下分镜建议：
 
 ```bash
-python scripts/render_annotation_preview.py <图片路径> <标注路径> <预览图输出路径>
+.venv/bin/python scripts/parse_srt.py input.srt \
+  --target-sec 30 \
+  --min-sec 25 \
+  --max-sec 35
 ```
 
-打开 `assets/preview.html`，使用“打开文件夹”载入场景目录，即可编辑区域、顺序、时间与字幕关联。
+这个命令会输出：
+- 每条字幕的起止时间
+- 建议分镜场景
+- 每个场景的 `sceneDurationMs`
 
-渲染单幕：
+### 2) 直接渲染带图白板动画
 
 ```bash
-<ENV_PY> scripts/render_stream_whiteboard.py <图片路径> <标注路径> <输出.mp4> assets/drawing-hand.png \
-  --ink-path grid --color-fill contour-wipe
+.venv/bin/python scripts/video_pipeline.py \
+  input.srt \
+  --image assets/whiteboard/demo.png \
+  --output output/single-scene \
+  --renderer whiteboard \
+  --tts audio8
 ```
 
-合并多幕：
+这会让系统：
+- 读取 SRT
+- 使用你提供的图片
+- 自动标注
+- 渲染白板动画
+- 合成最终 MP4
+
+如果你已经有标注，也可以复用对应流程产物，不需要重写整条管线。
+
+## 资产与画面的两种模式
+
+### 模式 A：自动资产
+
+如果你不传 `--image`，系统会走自动资产解析和自动标注链路。
+
+典型命令：
 
 ```bash
-<ENV_PY> scripts/merge_scenes.py --inputs 幕1.mp4 幕2.mp4 幕3.mp4 --output final.mp4
+.venv/bin/python scripts/story_pipeline.py \
+  output/my-story.json \
+  --output output/my-video \
+  --renderer auto \
+  --tts audio8
 ```
 
-## 质量检查
+适合：
+- 快速出片
+- 没有单独准备线稿图
+- 想直接用本地素材库和自动注释生成结果
 
-- 首帧是干净的暖米黄纸张底色，没有提前露出的线条
-- `canvas` 与原图尺寸一致，所有区域都是画布内的整数像素坐标
-- `sequence`、`startMs` 与字幕的叙事顺序一致
-- 中段帧中，未开始区域和保护区不会提前出现
-- 笔尖贴近当前流式笔迹；线稿清晰时可选择 `--ink-path skeleton`
-- 每幕结束后至少停留 0.5 秒完整画面；多幕合并顺序与字幕分镜一致
+### 模式 B：手动图片
 
-## 仓库内容
+如果你传了 `--image`，系统会进入手动图片流程。
+
+典型命令：
+
+```bash
+.venv/bin/python scripts/story_pipeline.py \
+  output/my-story.json \
+  --output output/my-video \
+  --image assets/whiteboard/demo.png \
+  --renderer auto \
+  --tts audio8
+```
+
+适合：
+- 你已经准备好了线稿图
+- 想保留特定构图和视觉风格
+
+## 常用参数说明
+
+`story_pipeline.py`
+
+- `--output`：输出目录
+- `--renderer`：渲染器，默认 `auto`
+- `--tts`：TTS 提供商，默认 `audio8`；也可指定 `auto`（失败后切换到 eSpeak）、`edge` 或 `espeak`
+- `--image-provider`：`none`（默认）或 `sensenova`，为每个场景调用 SenseNova 生成插画
+- `--asset-root`：额外资产根目录，可重复传多次
+- `--render-only`：只渲染画面，不做音频合成
+- `--srt-output`：自定义 SRT 文件名或路径
+
+`video_pipeline.py`
+
+- `--output`：输出目录
+- `--renderer`：渲染器，默认 `auto`
+- `--tts`：TTS 提供商，默认 `audio8`；也可指定 `auto`（失败后切换到 eSpeak）、`edge` 或 `espeak`
+- `--image-provider`：`none`（默认）或 `sensenova`，为每个场景调用 SenseNova 生成插画
+- `--image`：手动指定图片
+- `--asset-root`：额外资产根目录，可重复传多次
+- `--render-only`：只渲染画面
+
+默认 `audio8` 要求本机 Audio8 和 tts-hub 可用；启动失败或合成失败时任务会报错并写入失败清单，不会静默改用 Edge。`auto` 会回退到本机 eSpeak-NG，并在日志中提示。本地 eSpeak 需要系统安装 `espeak-ng`（或 `espeak`）和 `ffmpeg`。
+
+每次运行还会在 `run-manifest.json` 记录实际 TTS 后端、场景文件是否完整保留全部 SRT 字幕，以及最终 MP4、音视频轨道、音画结束差、字幕时间轴冲突、泛化画面主体和抽帧检查结果。时间轴、泛化主体或画面抽样发现异常时会标记 `review_required`，不阻断成片生成。输出目录的 `review/contact-sheet.jpg` 提供 5 个时间点的成片预览，`review/report.json` 记录帧亮度/对比度。当前检查不评价剧情语义正确性、镜头连续性或审美。
+
+## 一条最短可用命令
+
+如果你只想快速生成一条视频，可以直接用下面这条：
+
+```bash
+.venv/bin/python scripts/story_pipeline.py \
+  output/my-story.json \
+  --output output/my-video \
+  --renderer auto \
+  --tts audio8
+```
+
+## 常见结果文件
+
+生成后重点检查这些文件：
+
+- `scene.json`
+- `*.annotation.json`
+- `*.mp4`
+
+如果输出里有报错，通常先检查：
+- Story JSON 是否合法
+- SRT 是否为空
+- 图片路径是否存在
+- `ffmpeg` 是否在系统上可用
+- 是否使用了项目内的 `.venv/bin/python`
+
+## 建议的出片顺序
+
+1. 先用 `generate_story.py` 生成 Story
+2. 再用 `story_pipeline.py` 走自动流程出片
+3. 如果结果不满意，再考虑提供 `--image` 手动指定图片
+4. 对单幕需求，直接用 `video_pipeline.py` 配合 SRT + 图片
+
+## 目录约定
 
 ```text
 srt-whiteboard-animation/
-├── SKILL.md                         # 完整工作流与约束
-├── assets/
-│   ├── drawing-hand.png              # 手部素材
-│   ├── preview.html                  # 本地编辑预览台
-├── examples/                         # README 案例素材
-├── scripts/
-│   ├── parse_srt.py                  # 字幕解析与分镜建议
-│   ├── render_annotation_preview.py  # 标注检查图
-│   ├── render_stream_whiteboard.py   # 流式笔迹 MP4 渲染器
-│   ├── merge_scenes.py               # 多幕合并
-│   └── prepare_env.py                # 依赖环境准备
-└── agents/openai.yaml                # Codex 元数据
+├── assets/          # 素材与标注
+├── output/          # 生成产物
+├── scripts/         # 运行时脚本
+└── tests/           # 测试脚本
 ```
 
-## 贡献
-
-欢迎提交 Issue 或 Pull Request。任何涉及绘制逻辑的改动，都应使用真实的字幕、标注和成片检查遮罩保护、时序与最终画面。
-
-## 许可证
-
-本项目基于 MIT License 开源，详见 [LICENSE](LICENSE)。
-
-## 关于作者
-
-一个爱养鱼的老登 / AI Builder / 用 AI 团队打造一人公司。
-
-抖音、B站、公众号：江哥是老登啊
+如果你要长期维护这个项目，建议：
+- 运行时脚本放 `scripts/`
+- 测试脚本放 `tests/`
+- 生成结果统一放 `output/`

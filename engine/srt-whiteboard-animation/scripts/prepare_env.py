@@ -9,12 +9,16 @@
   4. 末行打印 ENV_PY=<解释器路径>，供上层调用方捕获
 
 用法：
-  python prepare_env.py          # 建环境 + 补依赖，输出 ENV_PY
-  python prepare_env.py --check  # 仅探测，缺东西就以非零码退出
+  python prepare_env.py --provider mock --tts audio8  # 准备默认语音流程
+  python prepare_env.py --provider gemini          # 额外安装 Gemini SDK
+  python prepare_env.py --tts edge                 # 额外安装 Edge TTS SDK
+  python prepare_env.py --check                    # 仅探测，缺东西就以非零码退出
 """
 from __future__ import annotations
 
 import os
+import argparse
+import shutil
 import subprocess
 import sys
 import venv
@@ -30,6 +34,14 @@ DEPS: dict[str, str] = {
     "numpy": "numpy",
     "av": "av",  # PyAV：纯 pip 安装的 H.264 编码，无需系统 ffmpeg
     "PIL": "Pillow",  # render_annotation_preview.py 画区域编号预览图（含中文标签）
+}
+
+PROVIDER_DEPS: dict[str, tuple[str, str]] = {
+    "gemini": ("google.genai", "google-genai"),
+}
+
+TTS_DEPS: dict[str, tuple[str, str]] = {
+    "edge": ("edge_tts", "edge-tts"),
 }
 
 
@@ -80,13 +92,51 @@ def install(py: Path, packages: list[str]) -> bool:
     return True
 
 
-def main() -> None:
-    check_only = "--check" in sys.argv
+def _check_system_commands() -> bool:
+    missing = []
+    if shutil.which("ffmpeg") is None:
+        missing.append("ffmpeg")
+    if shutil.which("ffprobe") is None:
+        missing.append("ffprobe (install FFmpeg tools)")
+    if shutil.which("espeak-ng") is None and shutil.which("espeak") is None:
+        missing.append("espeak-ng (or espeak), required for offline TTS fallback")
+
+    if missing:
+        for name in missing:
+            print(f"[miss] system command: {name}")
+        print("Install the missing system tools and ensure they are available on PATH.")
+        return False
+
+    print("[ok] ffmpeg, ffprobe, and offline TTS command")
+    return True
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="Prepare/check the local video-factory runtime")
+    parser.add_argument("--check", action="store_true", help="Check only; do not create the venv or install Python packages")
+    parser.add_argument("--provider", choices=("mock", "openai", "gemini"), default="mock", help="Story provider used by this setup")
+    parser.add_argument(
+        "--tts",
+        choices=("audio8", "auto", "edge", "espeak"),
+        default="audio8",
+        help="TTS provider used by this setup",
+    )
+    args = parser.parse_args(argv)
+
+    check_only = args.check
 
     py = ensure_venv(check_only)
 
+    dependencies = dict(DEPS)
+    optional_provider = PROVIDER_DEPS.get(args.provider)
+    if optional_provider:
+        dependencies[optional_provider[0]] = optional_provider[1]
+    optional_tts = TTS_DEPS.get(args.tts)
+    if optional_tts:
+        dependencies[optional_tts[0]] = optional_tts[1]
+
     missing: list[str] = []
-    for import_name, pip_name in DEPS.items():
+    for import_name, pip_name in dependencies.items():
         if can_import(py, import_name):
             print(f"[ok] {pip_name}")
         else:
@@ -99,6 +149,9 @@ def main() -> None:
             sys.exit(1)
         if not install(py, missing):
             sys.exit(1)
+
+    if not _check_system_commands():
+        sys.exit(1)
 
     # 末行：供调用方捕获的约定输出
     print(f"\nENV_PY={py}")
