@@ -12,10 +12,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from merge_scenes import main as merge_scenes_main
-from image_generation.sensenova import (
-    SenseNovaImageProvider,
-    build_scene_image_prompt,
+from image_generation import (
+    DEFAULT_PROVIDER_CHAIN,
+    IMAGE_PROVIDER_NAMES,
+    ImageProviderChain,
+    default_image_provider,
 )
+from image_generation.sensenova import build_scene_image_prompt
 from parse_srt import parse_srt as parse_srt_cues
 from scene.asset_bridge import auto_annotate_bridge
 from scene.asset_resolver import resolve_assets
@@ -24,6 +27,13 @@ from scene.planner import plan_srt_grouped
 from scene.visual_representation import resolve_visual_representation
 from scene.whiteboard_bridge import bridge_whiteboard
 from tts.router import create_tts_provider
+from tts.voice_profiles import (
+    DEFAULT_VOICE_PROFILE,
+    voice_profile_names,
+    resolve_voice_profile,
+    voice_profiles,
+)
+from visual_setting import load_or_build_visual_setting
 from renderers.router import create_renderer
 from renderers.selector import select_renderer
 
@@ -721,19 +731,44 @@ def _tts_diagnostics(requested_name, provider):
     return info
 
 
-def _create_tts_provider(name):
+def _create_tts_provider(name, voice_config=None):
+    """按名称创建 TTS Provider。
+
+    voice_config 来自 ``--voice-profile`` 解析结果（音色/语速/音高）；
+    未提供时退回项目历史默认值，保持既有调用契约。
+    """
+    if voice_config is None:
+        return create_tts_provider(
+            name,
+            voice=TTS_VOICE,
+            rate=TTS_RATE,
+            pitch=TTS_PITCH,
+        )
     return create_tts_provider(
         name,
-        voice=TTS_VOICE,
-        rate=TTS_RATE,
-        pitch=TTS_PITCH,
+        voice=voice_config.voice,
+        rate=voice_config.rate,
+        pitch=voice_config.pitch,
     )
 
 
-def _tts_pitch_label(provider):
-    if getattr(provider, "backend_name", None) == "audio8":
+def _tts_pitch_label(provider, voice_config=None):
+    if getattr(provider, "backend_name", None) in {"audio8", "piper"}:
         return "unsupported (ignored)"
-    return TTS_PITCH
+    return getattr(provider, "pitch", None) or (
+        voice_config.pitch if voice_config is not None else TTS_PITCH
+    )
+
+
+def print_tts_summary(tts_name, provider, voice_config):
+    """按同一格式汇报实际生效的语音配置，避免日志与实际音色不一致。"""
+    pitch = _tts_pitch_label(provider, voice_config)
+    print(f"TTS Provider : {tts_name}")
+    if voice_config is not None:
+        print(f"Voice Profile: {voice_config.name} ({voice_config.label}) [{voice_config.language}]")
+    print(f"Voice : {getattr(provider, 'voice', getattr(voice_config, 'voice', TTS_VOICE))}")
+    print(f"Rate  : {getattr(provider, 'rate', getattr(voice_config, 'rate', TTS_RATE))}")
+    print(f"Pitch : {pitch}")
 
 
 # ============================================================
@@ -1163,6 +1198,25 @@ def build_final_video(    whiteboard_video,
 # Main Pipeline
 # ============================================================
 
+def _resolve_tts_name(tts_name, voice_config):
+    """--tts 未显式指定时，由语音档案决定使用哪个 Provider。"""
+    if not tts_name or tts_name == "profile":
+        return voice_config.provider
+    return tts_name
+
+
+def _voice_profile_state(voice_config):
+    return {
+        "name": voice_config.name,
+        "label": voice_config.label,
+        "language": voice_config.language,
+        "provider": voice_config.provider,
+        "voice": voice_config.voice,
+        "rate": voice_config.rate,
+        "pitch": voice_config.pitch,
+    }
+
+
 def _run_pipeline(
     srt_path,
     output_dir=None,
@@ -1177,6 +1231,11 @@ def _run_pipeline(
     image_provider_name="none",
     resume=False,
     state=None,
+    voice_profile=None,
+    voice=None,
+    voice_rate=None,
+    voice_pitch=None,
+    visual_setting_mode="auto",
 ):
     """执行一次流水线；把阶段与产物写入 state 供产物清单使用。"""
     if state is None:
@@ -1185,14 +1244,45 @@ def _run_pipeline(
     def _stage(name):
         state["stage"] = name
 
+    _voice_cache = {}
+
+    def resolve_voice_config():
+        """解析语音档案；auto 时按开头字幕语种选英文或中文音色。"""
+        if "value" not in _voice_cache:
+            try:
+                sample = " ".join(str(item.get("text", "")) for item in subtitles[:3])
+            except (NameError, TypeError):
+                sample = ""
+            profile = resolve_voice_profile(
+                voice_profile or DEFAULT_VOICE_PROFILE,
+                sample_text=sample,
+                voice=voice,
+                rate=voice_rate,
+                pitch=voice_pitch,
+            )
+            _voice_cache["value"] = profile
+            print(
+                f"Voice Profile: {profile.name} -> {profile.provider}/{profile.voice} "
+                f"({profile.label})"
+            )
+        return _voice_cache["value"]
+
+    def make_tts(name):
+        profile = resolve_voice_config()
+        resolved = _resolve_tts_name(name, profile)
+        return resolved, _create_tts_provider(resolved, profile)
+
     state.setdefault("audio_files", [])
     state.setdefault("scene_clips", [])
     state["srt"] = str(srt_path)
     state["image"] = str(image_path) if image_path else None
     state["requested_output_dir"] = str(output_dir) if output_dir else None
 
-    if image_provider_name not in {"none", "sensenova"}:
-        raise ValueError(f"Unsupported image provider: {image_provider_name}")
+    if image_provider_name not in {"none", "auto", *IMAGE_PROVIDER_NAMES}:
+        raise ValueError(
+            f"Unsupported image provider: {image_provider_name}; expected one of "
+            f"none/auto/{'/'.join(IMAGE_PROVIDER_NAMES)}"
+        )
     if image_provider_name != "none" and image_path is not None:
         raise ValueError("--image and --image-provider cannot be used together")
 
@@ -1302,21 +1392,45 @@ def _run_pipeline(
             planned.visual["srt"] = str(srt_path)
 
     generated_image_paths: dict[str, Path] = {}
-    if image_provider_name == "sensenova":
-        image_provider = SenseNovaImageProvider()
+    if image_provider_name != "none":
+        image_chain = _build_image_chain(image_provider_name)
         image_dir = output_dir / ".images"
+        # 全片视觉设定：一次生成、逐幕复用，防止人物/服饰/文化风格在逐幕独立请求中漂移
+        _stage("visual_setting")
+        visual_setting = load_or_build_visual_setting(
+            visual_setting_mode,
+            title=srt_path.stem,
+            lines=[str(item.get("text", "")) for item in subtitles],
+            output_dir=output_dir,
+        )
+        state["visual_setting"] = (
+            str(output_dir / ".visual" / "visual-setting.json")
+            if visual_setting is not None
+            else None
+        )
         generation_report = {
-            "provider": "sensenova",
-            "model": image_provider.model,
-            "size": "1024x576",
+            "requested_provider": image_provider_name,
+            "provider": None,
+            "model": None,
+            "size": None,
+            "prompt_extend": None,
+            "candidates": list(image_chain.candidates),
+            "attempts": [],
+            "visual_setting": visual_setting.to_dict() if visual_setting is not None else None,
             "images": [],
         }
         state["image_generation"] = generation_report
-        print(f"Image Provider : sensenova ({image_provider.model})")
+        print(
+            "Image Provider : requested="
+            f"{image_provider_name} candidates=" + "/".join(image_chain.candidates)
+        )
+        if visual_setting is not None:
+            print(f"Visual Setting : {visual_setting.source} "
+                  f"({len(visual_setting.characters)} character sheet entries)")
         for index, planned in enumerate(planned_scenes, start=1):
             _stage("image_generation")
             image_target = image_dir / f"scene-{index:02d}.png"
-            image_prompt = build_scene_image_prompt(planned)
+            image_prompt = build_scene_image_prompt(planned, visual_setting)
             reused = False
             if image_target.is_file():
                 from image_generation.sensenova import _validate_png
@@ -1328,7 +1442,8 @@ def _run_pipeline(
                 except (OSError, ValueError, RuntimeError):
                     pass
             if not reused:
-                image_provider.generate(image_prompt, image_target)
+                image_chain.generate(image_prompt, image_target)
+            image_width, image_height = _image_dimensions(image_target)
             generated_image_paths[planned.id] = image_target
             planned.renderer = "cinematic"
             planned.visual["image"] = str(image_target)
@@ -1337,11 +1452,22 @@ def _run_pipeline(
                 "scene_id": planned.id,
                 "path": str(image_target),
                 "prompt": image_prompt,
-                "width": 1024,
-                "height": 576,
+                "provider": image_chain.active_name,
+                "width": image_width,
+                "height": image_height,
                 "size_bytes": image_target.stat().st_size,
                 "reused": reused,
             })
+        active = image_chain.active_provider
+        generation_report["provider"] = image_chain.active_name or image_provider_name
+        generation_report["model"] = getattr(active, "model", None)
+        generation_report["size"] = getattr(active, "image_size", None)
+        generation_report["prompt_extend"] = bool(getattr(active, "prompt_extend", False))
+        generation_report["attempts"] = list(image_chain.attempts)
+        print(
+            f"Image Provider : resolved={generation_report['provider']} "
+            f"({generation_report['model']}, size={generation_report['size']})"
+        )
         scene = planned_scenes[0]
 
     if image_path is not None:
@@ -1368,7 +1494,7 @@ def _run_pipeline(
 
     selected_renderer_name = (
         "cinematic"
-        if image_provider_name == "sensenova"
+        if image_provider_name != "none"
         else select_renderer(scene) if renderer_name == "auto" else renderer_name
     )
     print(f"Renderer : {selected_renderer_name}")
@@ -1457,14 +1583,12 @@ def _run_pipeline(
             return whiteboard_video
 
         print()
-        print(f"TTS Provider : {tts_name}")
-        print(f"Voice : {getattr(provider, 'voice', TTS_VOICE)}")
-        print(f"Rate  : {TTS_RATE}")
-        print(f"Pitch : {_tts_pitch_label(provider)}")
-
         _stage("tts")
-        provider = _create_tts_provider(tts_name)
+        voice_config = resolve_voice_config()
+        tts_name, provider = make_tts(tts_name)
+        print_tts_summary(tts_name, provider, voice_config)
         state["tts"] = _tts_diagnostics(tts_name, provider)
+        state["voice_profile"] = _voice_profile_state(voice_config)
 
         audio_files = generate_all_tts(
             provider,
@@ -1592,12 +1716,11 @@ def _run_pipeline(
         burnin_srt = srt_path
         if not render_only:
             _stage("tts")
-            provider = _create_tts_provider(tts_name)
+            voice_config = resolve_voice_config()
+            tts_name, provider = make_tts(tts_name)
+            print_tts_summary(tts_name, provider, voice_config)
             state["tts"] = _tts_diagnostics(tts_name, provider)
-            print(f"TTS Provider : {tts_name}")
-            print(f"Voice : {getattr(provider, 'voice', TTS_VOICE)}")
-            print(f"Rate  : {TTS_RATE}")
-            print(f"Pitch : {_tts_pitch_label(provider)}")
+            state["voice_profile"] = _voice_profile_state(voice_config)
             audio_files = generate_all_tts(
                 provider,
                 subtitles,
@@ -1812,13 +1935,12 @@ def _run_pipeline(
         / f"{output_dir.name}-voice.m4a"
     )
     _stage("tts")
-    provider = _create_tts_provider(tts_name)
+    voice_config = resolve_voice_config()
+    tts_name, provider = make_tts(tts_name)
     state["tts"] = _tts_diagnostics(tts_name, provider)
+    state["voice_profile"] = _voice_profile_state(voice_config)
 
-    print(f"TTS Provider : {tts_name}")
-    print(f"Voice : {getattr(provider, 'voice', TTS_VOICE)}")
-    print(f"Rate  : {TTS_RATE}")
-    print(f"Pitch : {_tts_pitch_label(provider)}")
+    print_tts_summary(tts_name, provider, voice_config)
 
     audio_files = generate_all_tts(
         provider,
@@ -1951,6 +2073,31 @@ def _assert_outputs_do_not_overwrite_inputs(output_dir, srt_path, image_path=Non
 # M4-6：本次运行会写入的目标产物（用于覆盖保护）。
 # 只覆盖"本次运行确实会写"的固定命名产物，目录中的其他既有文件不参与判定，
 # 避免用户把成品放进已有目录时被无关文件误拒。
+def _build_image_chain(image_provider_name):
+    """Resolve a CLI provider name into an image chain that locks on first success."""
+
+    key = (image_provider_name or "none").strip().lower()
+    if key == "none":
+        raise ValueError("image provider 'none' has no chain")
+    if key in {"auto", "chain", "fallback"}:
+        candidates = tuple(DEFAULT_PROVIDER_CHAIN)
+    else:
+        candidates = (key,)
+    return ImageProviderChain(candidates, log=print)
+
+
+def _image_dimensions(path):
+    """Return the real pixel size of a generated scene image."""
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.width, image.height
+    except Exception:  # noqa: BLE001 - diagnostics only
+        return None, None
+
+
 def _target_artifact_paths(
     output_dir, image_path=None, render_only=False, image_provider_name="none"
 ):
@@ -1975,7 +2122,7 @@ def _target_artifact_paths(
         ]
     targets.extend(sorted(output_dir.glob(f"{name}-scene-*.mp4")))
     targets.append(output_dir / "run-manifest.json")
-    if image_provider_name == "sensenova":
+    if image_provider_name != "none":
         targets.append(output_dir / ".images")
     return targets
 
@@ -2000,17 +2147,17 @@ def _assert_targets_do_not_exist(
         image_provider_name=image_provider_name,
     ) if path.exists() and not (
         resume
-        and image_provider_name == "sensenova"
+        and image_provider_name != "none"
         and path == Path(output_dir) / "run-manifest.json"
     ) and not (
         resume
-        and image_provider_name == "sensenova"
+        and image_provider_name != "none"
         and path == Path(output_dir) / ".images"
     )]
 
     output_dir = Path(output_dir)
     protected_intermediate_dirs = [".tts", ".timing"]
-    if image_provider_name == "sensenova" and not resume:
+    if image_provider_name != "none" and not resume:
         protected_intermediate_dirs.append(".images")
     for sub in protected_intermediate_dirs:
         intermediate_dir = output_dir / sub
@@ -2469,10 +2616,15 @@ def main(
     group_target_ms=8000,
     image_provider_name="none",
     resume=False,
+    voice_profile=None,
+    voice=None,
+    voice_rate=None,
+    voice_pitch=None,
+    visual_setting_mode="auto",
 ):
     """M4-3 包装层：保持既有调用契约，额外产出产物清单与失败诊断。"""
-    if resume and image_provider_name != "sensenova":
-        raise ValueError("resume is supported only with the SenseNova image provider")
+    if resume and image_provider_name == "none":
+        raise ValueError("resume requires an image provider")
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     state = {}
     resolved_output = Path(
@@ -2510,6 +2662,11 @@ def main(
             image_provider_name=image_provider_name,
             resume=resume,
             state=state,
+            voice_profile=voice_profile,
+            voice=voice,
+            voice_rate=voice_rate,
+            voice_pitch=voice_pitch,
+            visual_setting_mode=visual_setting_mode,
         )
         _write_run_diagnostics(
             resolved_output,
@@ -2534,11 +2691,29 @@ def main(
 # ============================================================
 
 def _parse_legacy_positional(argv):
-    if len(argv) >= 4 and not argv[0].startswith("--"):
+    # Only the three leading positional slots may be paths; if any of them is a
+    # flag the command uses the flag-based CLI (e.g. "<srt> --output DIR ...")
+    # and must not be mistaken for the legacy "<srt> <image> <output_dir>" form.
+    if (
+        len(argv) >= 4
+        and not argv[0].startswith("--")
+        and not argv[1].startswith("--")
+        and not argv[2].startswith("--")
+    ):
         srt_path, image_path, output_dir = argv[:3]
         rest = argv[3:]
         return srt_path, image_path, output_dir, rest
     return None
+
+
+def _print_voice_profiles():
+    print("可用语音档案（--voice-profile）：")
+    for profile in voice_profiles():
+        print(
+            f"  {profile.name:<24} {profile.language:<3} {profile.provider:<7} "
+            f"{profile.voice:<28} rate={profile.rate:<6} {profile.label}"
+        )
+    print("默认 auto：按字幕语种自动选择（中文 -> zh-cn-natural（Audio8，保持历史默认），其它 -> en-us-narrator）")
 
 
 def main_cli(argv=None):
@@ -2556,10 +2731,24 @@ def main_cli(argv=None):
         parser.add_argument("srt", help="SRT path")
         parser.add_argument("image", help="Image path")
         parser.add_argument("output_dir", help="Output directory")
-        parser.add_argument("--tts", default="audio8")
+        parser.add_argument("--tts", default=None)
         parser.add_argument("--renderer", default="whiteboard")
+        parser.add_argument("--voice-profile", default=DEFAULT_VOICE_PROFILE)
+        parser.add_argument("--voice")
+        parser.add_argument("--voice-rate")
+        parser.add_argument("--voice-pitch")
         parsed = parser.parse_args(rest)
-        main(parsed.srt, parsed.output_dir, renderer_name=parsed.renderer, tts_name=parsed.tts, image_path=parsed.image)
+        main(
+            parsed.srt,
+            parsed.output_dir,
+            renderer_name=parsed.renderer,
+            tts_name=parsed.tts,
+            image_path=parsed.image,
+            voice_profile=parsed.voice_profile,
+            voice=parsed.voice,
+            voice_rate=parsed.voice_rate,
+            voice_pitch=parsed.voice_pitch,
+        )
         return
 
     parser = argparse.ArgumentParser(description="Video pipeline")
@@ -2569,15 +2758,34 @@ def main_cli(argv=None):
     parser.add_argument("--renderer", default="auto", help="Renderer override or auto")
     parser.add_argument(
         "--tts",
-        choices=("audio8", "auto", "edge", "espeak"),
-        default="audio8",
-        help="TTS provider: audio8 (default), auto (Audio8 then eSpeak), edge, or espeak",
+        choices=("audio8", "auto", "edge", "espeak", "piper"),
+        default=None,
+        help="TTS provider; omit to use the provider declared by --voice-profile "
+             "(audio8 / auto / edge / espeak / piper)",
     )
     parser.add_argument(
+        "--voice-profile",
+        default=DEFAULT_VOICE_PROFILE,
+        help="Voice preset, e.g. en-us-narrator (English) or zh-cn-narrator; "
+             "use --list-voices to see all presets",
+    )
+    parser.add_argument("--voice", help="Override the voice id of the selected profile")
+    parser.add_argument("--voice-rate", help="Override speaking rate, e.g. -8%%")
+    parser.add_argument("--voice-pitch", help="Override pitch, e.g. -2Hz")
+    parser.add_argument(
+        "--visual-setting",
+        default="auto",
+        help="Film-wide visual setting: auto (derive from narration), none (legacy), or a JSON path",
+    )
+    parser.add_argument("--list-voices", action="store_true", help="List voice presets and exit")
+    parser.add_argument(
         "--image-provider",
-        choices=("none", "sensenova"),
-        default="none",
-        help="Scene image generation provider (sensenova generates one image per scene)",
+        choices=("none", *IMAGE_PROVIDER_NAMES, "auto"),
+        default=default_image_provider(),
+        help=(
+            "Scene image generation provider: sensenova, zhipu, or auto "
+            "(try sensenova first, fall back to zhipu before the first frame is accepted)"
+        ),
     )
     parser.add_argument("--asset-root", action="append", default=[], help="Additional asset root; repeatable")
     parser.add_argument("--env-py", help="Python interpreter path for helper scripts")
@@ -2585,8 +2793,12 @@ def main_cli(argv=None):
     parser.add_argument("--render-only", action="store_true", help="Render MP4 only; skip TTS/audio merge")
     parser.add_argument("--background-map", help="JSON file mapping scene id -> background image path (cinematic mode)")
     parser.add_argument("--group-target", type=int, default=8000, help="Target scene duration in ms for SRT grouping")
-    parser.add_argument("--resume", action="store_true", help="Resume an interrupted SenseNova image run, reusing valid scene images")
+    parser.add_argument("--resume", action="store_true", help="Resume an interrupted image run, reusing valid scene images")
     parsed = parser.parse_args(args)
+
+    if parsed.list_voices:
+        _print_voice_profiles()
+        return
 
     srt_path = parsed.input or parsed.srt
     if not srt_path:
@@ -2610,6 +2822,11 @@ def main_cli(argv=None):
         group_target_ms=parsed.group_target,
         image_provider_name=parsed.image_provider,
         resume=parsed.resume,
+        voice_profile=parsed.voice_profile,
+        voice=parsed.voice,
+        voice_rate=parsed.voice_rate,
+        voice_pitch=parsed.voice_pitch,
+        visual_setting_mode=parsed.visual_setting,
     )
 
 

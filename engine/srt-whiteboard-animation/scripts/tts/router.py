@@ -5,13 +5,14 @@ from .auto import AutoTTSProvider
 from .audio8 import Audio8TTSProvider
 from .edge import EdgeTTSProvider
 from .espeak import EspeakTTSProvider
+from .piper import PiperTTSProvider
 
 
 def create_tts_provider(name: str, **kwargs) -> TTSProvider:
     """根据名称创建 TTS Provider。
 
     Args:
-        name: Provider 名称，支持 "audio8"、"auto"、"edge" 和 "espeak"。
+        name: Provider 名称，支持 "audio8"、"auto"、"edge"、"espeak" 和 "piper"。
         **kwargs: 传递给 Provider 构造函数的参数。
 
     Returns:
@@ -30,5 +31,9 @@ def create_tts_provider(name: str, **kwargs) -> TTSProvider:
         return EdgeTTSProvider(**kwargs)
     if name == "espeak":
         return EspeakTTSProvider(**kwargs)
+    if name == "piper":
+        kwargs = dict(kwargs)
+        kwargs.pop("audio8_voice", None)
+        return PiperTTSProvider(**kwargs)
 
     raise ValueError(f"Unsupported TTS provider: {name}")

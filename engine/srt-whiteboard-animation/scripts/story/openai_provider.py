@@ -87,17 +87,29 @@ class OpenAIChatProvider(StoryProvider):
     def request_url(self) -> str:
         return f"{self._base_url}/chat/completions"
 
-    def generate(self, topic: str) -> str:
+    def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> str:
+        """Generic chat call for non-story helpers (e.g. the film visual setting)."""
+        raw = self._request(system_prompt, user_prompt, temperature)
+        data = json.loads(raw)
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                f"openai provider returned unexpected response schema: {raw[:500]}"
+            ) from exc
+
+    def _request(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> str:
+        """POST one chat completion and return the raw response body."""
         if not self._api_key:
             raise RuntimeError("OPENAI_API_KEY is required for openai story provider")
 
         payload = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": topic},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0,
+            "temperature": temperature,
         }
 
         request = urllib.request.Request(
@@ -131,8 +143,7 @@ class OpenAIChatProvider(StoryProvider):
             print(f"[warn] Story API request failed; retrying in {delay}s ({attempt + 1}/{self._retries}): {last_error}")
             time.sleep(delay)
 
-        data = json.loads(raw)
-        try:
-            return data["choices"][0]["message"]["content"]
-        except KeyError as exc:
-            raise RuntimeError(f"openai provider returned unexpected response schema: {raw[:500]}") from exc
+        return raw
+
+    def generate(self, topic: str) -> str:
+        return self.chat(SYSTEM_PROMPT, topic, temperature=0.0)

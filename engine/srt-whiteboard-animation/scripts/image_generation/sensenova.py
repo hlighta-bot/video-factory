@@ -37,6 +37,7 @@ class SenseNovaImageProvider:
         model: str | None = None,
         timeout: float | None = None,
         retries: int | None = None,
+        prompt_extend: bool | None = None,
         load_env: bool = True,
     ):
         if load_env:
@@ -66,6 +67,13 @@ class SenseNovaImageProvider:
             raise ValueError("SENSENOVA_IMAGE_TIMEOUT must be positive")
         if not 0 <= self.retries <= 5:
             raise ValueError("SENSENOVA_IMAGE_RETRIES must be an integer in [0, 5]")
+        # Auto prompt rewriting is off by default: it silently drops the
+        # film-wide visual setting (culture/costume/era) that keeps characters
+        # consistent across scenes.
+        if prompt_extend is None:
+            raw_extend = os.getenv("SENSENOVA_PROMPT_EXTEND", "false").strip().lower()
+            prompt_extend = raw_extend in {"1", "true", "yes", "on"}
+        self.prompt_extend = bool(prompt_extend)
 
     def generate(
         self,
@@ -91,7 +99,7 @@ class SenseNovaImageProvider:
             "output_format": "png",
             "response_format": "b64_json",
             "watermark": False,
-            "prompt_extend": True,
+            "prompt_extend": self.prompt_extend,
         }
         request = urllib.request.Request(
             f"{self.base_url}/images/generations",
@@ -177,8 +185,15 @@ def _validate_png(path: Path) -> None:
         raise RuntimeError(f"SenseNova returned an unreadable PNG: {exc}") from exc
 
 
-def build_scene_image_prompt(scene: Any) -> str:
-    """Translate scene fields into a stable, caption-free illustration prompt."""
+def build_scene_image_prompt(scene: Any, visual_setting: Any = None) -> str:
+    """Translate scene fields into a stable, caption-free illustration prompt.
+
+    Args:
+        scene: planned scene object.
+        visual_setting: optional film-wide ``VisualSetting``. When provided, its
+            block is prepended so culture, era, cast and style stay identical
+            across every scene instead of being re-guessed per request.
+    """
     visual = scene.visual or {}
     visual_plan = visual.get("visual_plan") or {}
     semantic = visual_plan.get("semantic") or visual.get("semantic") or {}
@@ -203,11 +218,23 @@ def build_scene_image_prompt(scene: Any) -> str:
 
     description = scene_details or ", ".join(facts)
     semantic_hint = "; ".join(facts)
-    return (
+    scene_text = " ".join([description, semantic_hint])
+
+    parts = []
+    if visual_setting is not None:
+        parts.append(visual_setting.render(scene_text))
+        parts.append("")
+        consistency = (
+            "Keep culture, era, character faces, hair and costumes exactly as specified in the "
+            "FILM-WIDE VISUAL SETTING above. "
+        )
+    else:
+        consistency = ""
+    parts.append(
         "Create one beautiful wide 16:9 illustration for a narrated video scene. "
-        "Use a polished storybook editorial illustration style with painterly texture, "
-        "layered depth, deliberate composition, rich but natural colors, and soft cinematic lighting. "
-        f"Depict this scene faithfully: {description}. "
+        + consistency
+        + f"Depict this scene faithfully: {description}. "
         f"Visual guidance: {semantic_hint or 'clear central subject and readable environment'}. "
         "Do not include any text, letters, captions, subtitles, labels, borders, logos, or watermarks."
     )
+    return "\n".join(parts)

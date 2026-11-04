@@ -9,7 +9,7 @@ def create_story_provider(name: str, **kwargs) -> StoryProvider:
     """根据名称创建 Story Provider。
 
     Args:
-        name: Provider 名称，目前支持 "mock"、"openai" 和 "gemini"。
+        name: Provider 名称，目前支持 "mock"、"openai"、"gemini" 和 "zhipu"。
         **kwargs: 传递给 Provider 构造函数的参数。
 
     Returns:
@@ -30,5 +30,10 @@ def create_story_provider(name: str, **kwargs) -> StoryProvider:
         from .gemini_provider import GeminiStoryProvider
 
         return GeminiStoryProvider(**kwargs)
+
+    if name == "zhipu":
+        from .zhipu_provider import ZhipuChatProvider
+
+        return ZhipuChatProvider(**kwargs)
 
     raise ValueError(f"Unsupported story provider: {name}")

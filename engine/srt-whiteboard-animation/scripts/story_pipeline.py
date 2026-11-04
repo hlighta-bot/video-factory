@@ -25,6 +25,7 @@ import argparse
 import json
 from pathlib import Path
 
+from image_generation import IMAGE_PROVIDER_NAMES, default_image_provider
 from story_schema import StoryValidationError, validate_story
 from story_to_srt import DEFAULT_PAUSE_MS, DEFAULT_CHARS_PER_SECOND, write_srt_from_story
 from video_pipeline import (
@@ -48,20 +49,33 @@ def main_cli(argv=None) -> int:
     parser.add_argument("--renderer", default="auto", help="Renderer override or auto")
     parser.add_argument(
         "--tts",
-        choices=("audio8", "auto", "edge", "espeak"),
-        default="audio8",
-        help="TTS provider: audio8 (default), auto (Audio8 then eSpeak), edge, or espeak",
+        choices=("audio8", "auto", "edge", "espeak", "piper"),
+        default=None,
+        help="TTS provider; omit to use the provider declared by --voice-profile",
+    )
+    parser.add_argument(
+        "--voice-profile",
+        default="auto",
+        help="Voice preset (en-us-narrator for Western audiences, zh-cn-narrator for Chinese)",
+    )
+    parser.add_argument("--voice", help="Override the voice id of the selected profile")
+    parser.add_argument("--voice-rate", help="Override speaking rate, e.g. -8%%")
+    parser.add_argument("--voice-pitch", help="Override pitch, e.g. -2Hz")
+    parser.add_argument(
+        "--visual-setting",
+        default="auto",
+        help="Film-wide visual setting: auto (derive from narration), none, or a JSON path",
     )
     parser.add_argument(
         "--image-provider",
-        choices=("none", "sensenova"),
-        default="none",
-        help="Scene image generation provider",
+        choices=("none", *IMAGE_PROVIDER_NAMES, "auto"),
+        default=default_image_provider(),
+        help="Scene image generation provider (sensenova, zhipu, or auto failover)",
     )
     parser.add_argument("--asset-root", action="append", default=[], help="Additional asset root; repeatable")
     parser.add_argument("--env-py", help="Python interpreter path for helper scripts")
     parser.add_argument("--render-only", action="store_true", help="Render MP4 only; skip TTS/audio merge")
-    parser.add_argument("--resume", action="store_true", help="Resume an interrupted SenseNova image run using the existing Story/SRT and valid images")
+    parser.add_argument("--resume", action="store_true", help="Resume an interrupted image run using the existing Story/SRT and valid images")
     parser.add_argument("--srt-output", help="Generated SRT filename or full path")
     parser.add_argument("--chars-per-second", type=float, default=DEFAULT_CHARS_PER_SECOND)
     parser.add_argument("--pause-ms", type=int, default=DEFAULT_PAUSE_MS)
@@ -69,8 +83,8 @@ def main_cli(argv=None) -> int:
 
     if args.image and args.image_provider != "none":
         raise RuntimeError("--image and --image-provider cannot be used together")
-    if args.resume and args.image_provider != "sensenova":
-        raise RuntimeError("--resume currently requires --image-provider sensenova")
+    if args.resume and args.image_provider == "none":
+        raise RuntimeError("--resume requires an image provider")
 
     story_path = Path(args.story).resolve()
     output_dir = Path(args.output).resolve()
@@ -131,6 +145,11 @@ def main_cli(argv=None) -> int:
             image_path=args.image,
             image_provider_name=args.image_provider,
             resume=args.resume,
+            voice_profile=args.voice_profile,
+            voice=args.voice,
+            voice_rate=args.voice_rate,
+            voice_pitch=args.voice_pitch,
+            visual_setting_mode=args.visual_setting,
         )
     except Exception as exc:
         print(f"[err] video pipeline failed: {exc}")

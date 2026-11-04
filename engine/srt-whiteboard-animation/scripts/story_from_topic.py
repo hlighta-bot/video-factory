@@ -48,10 +48,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
+from image_generation import IMAGE_PROVIDER_NAMES, default_image_provider
+from story.config import load_project_env
 from story.generator import generate_story
 from story.router import create_story_provider
 from story_pipeline import main_cli as story_pipeline_main
@@ -190,13 +193,15 @@ def _dispatch_to_video_pipeline(
     chars_per_second: float,
     pause_ms: int,
     renderer: str,
-    tts_name: str,
+    tts_name: str | None,
     render_only: bool,
     env_py: str | None,
     asset_roots: Sequence[str],
     image: str | None,
     image_provider: str,
     resume: bool = False,
+    voice_profile: str = "auto",
+    visual_setting: str = "auto",
 ) -> int:
     """Call story_pipeline.main_cli with the flags this CLI exposes.
 
@@ -216,11 +221,13 @@ def _dispatch_to_video_pipeline(
         str(pause_ms),
         "--renderer",
         renderer,
-        "--tts",
-        tts_name,
         "--image-provider",
         image_provider,
     ]
+    # Only forward --tts when the caller actually chose one; downstream derives
+    # the provider from --voice-profile when --tts is absent.
+    if tts_name:
+        argv += ["--tts", tts_name]
     if render_only:
         argv.append("--render-only")
     if env_py is not None:
@@ -231,6 +238,7 @@ def _dispatch_to_video_pipeline(
         argv += ["--image", image]
     if resume:
         argv.append("--resume")
+    argv += ["--voice-profile", voice_profile, "--visual-setting", visual_setting]
     return story_pipeline_main(argv)
 
 
@@ -243,10 +251,17 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Topic prompt passed to the Story provider.",
     )
+    # Story generation defaults to the cheap text model configured in .env.
+    # Set STORY_PROVIDER=zhipu to route story writing to GLM-4.7-Flash; an
+    # explicit --provider still wins, and "mock" keeps the CLI offline.
+    load_project_env()
     parser.add_argument(
         "--provider",
-        default="mock",
-        help="Story provider name (default: mock). Real providers require env keys.",
+        default=os.getenv("STORY_PROVIDER", "mock"),
+        help=(
+            "Story provider name (default: $STORY_PROVIDER or mock). "
+            "Real providers require env keys."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -281,16 +296,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tts",
-        default="audio8",
-        help="TTS provider name forwarded to video_pipeline (default: audio8).",
+        choices=("audio8", "auto", "edge", "espeak", "piper"),
+        default=None,
+        help="TTS provider name forwarded to video_pipeline (default: from --voice-profile).",
+    )
+    parser.add_argument(
+        "--voice-profile",
+        default="auto",
+        help=(
+            "Narration voice preset, forwarded to video_pipeline. "
+            "auto picks en-us-narrator for Latin-script narration and "
+            "zh-cn-natural (local Audio8) for Chinese narration."
+        ),
+    )
+    parser.add_argument(
+        "--visual-setting",
+        default="auto",
+        help=(
+            "Film-wide visual setting, forwarded to video_pipeline: auto derives "
+            "one culture/cast/style block from the narration, none disables it, "
+            "or pass a JSON path to reuse a previously reviewed setting."
+        ),
     )
     parser.add_argument(
         "--image-provider",
-        choices=("none", "sensenova"),
-        default="none",
+        choices=("none", *IMAGE_PROVIDER_NAMES, "auto"),
+        default=default_image_provider(),
         help=(
-            "Generate a separate SenseNova illustration for every scene. "
-            "Requires an API key in .env."
+            "Generate a separate illustration for every scene: sensenova, zhipu, "
+            "or auto (sensenova first, zhipu as failover). Requires an API key in .env."
         ),
     )
     parser.add_argument(
@@ -358,8 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.image and args.image_provider != "none":
         raise CliError("--image and --image-provider cannot be used together")
-    if args.resume and args.image_provider != "sensenova":
-        raise CliError("--resume currently requires --image-provider sensenova")
+    if args.resume and args.image_provider == "none":
+        raise CliError("--resume requires an image provider")
 
     output_dir = _resolve_output_dir(args.output_dir)
     story_path = _story_output_path(output_dir, args.story_output)
@@ -448,6 +482,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         image=args.image,
         image_provider=args.image_provider,
         resume=args.resume,
+        voice_profile=args.voice_profile,
+        visual_setting=args.visual_setting,
     )
     if exit_code != 0:
         print(f"[err] downstream pipeline exited with code {exit_code}", file=sys.stderr)
